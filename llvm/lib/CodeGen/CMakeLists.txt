@@ -139,6 +139,7 @@ add_llvm_library(LLVMCodeGen
   SlotIndexes.cpp
   SpillPlacement.cpp
   SplitKit.cpp
+  SSRegAlloc.cpp
   StackColoring.cpp
   StackMapLivenessAnalysis.cpp
   StackMaps.cpp

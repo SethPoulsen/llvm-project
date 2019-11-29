@@ -377,6 +377,7 @@ void initializeSjLjEHPreparePass(PassRegistry&);
 void initializeSlotIndexesPass(PassRegistry&);
 void initializeSpeculativeExecutionLegacyPassPass(PassRegistry&);
 void initializeSpillPlacementPass(PassRegistry&);
+void initializeSSRegAllocPass(PassRegistry&);
 void initializeStackColoringPass(PassRegistry&);
 void initializeStackMapLivenessPass(PassRegistry&);
 void initializeStackProtectorPass(PassRegistry&);
