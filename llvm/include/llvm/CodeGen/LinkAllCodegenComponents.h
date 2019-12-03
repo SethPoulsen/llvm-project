@@ -36,6 +36,7 @@ namespace {
       (void) llvm::createDefaultPBQPRegisterAllocator();
 
       (void) llvm::createSSRegisterAllocator();
+      (void) llvm::createNaiveRegisterAllocator();
 
       llvm::linkAllBuiltinGCs();
 

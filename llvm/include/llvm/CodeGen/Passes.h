@@ -140,7 +140,10 @@ namespace llvm {
   extern char &RABasicID;
 
   /// Sam & Seth register allocator
-  extern char &SSRegAllocID;
+  extern char &RegAllocSSID;
+
+  /// Sam & Seth Naive register allocator
+  extern char &RegAllocNaiveID;
 
   /// VirtRegRewriter pass. Rewrite virtual registers to physical registers as
   /// assigned in VirtRegMap.
@@ -170,6 +173,8 @@ namespace llvm {
   FunctionPass *createBasicRegisterAllocator();
 
   FunctionPass* createSSRegisterAllocator();
+
+  FunctionPass* createNaiveRegisterAllocator();
 
   /// Greedy register allocation pass - This pass implements a global register
   /// allocator for optimized builds.

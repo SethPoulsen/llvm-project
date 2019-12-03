@@ -1,4 +1,4 @@
-//===-- SSRegAlloc.cpp - Basic Register Allocator ----------------------===//
+//===-- RegAllocNaive.cpp - Basic Register Allocator ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the SSRegAlloc function pass, which provides a minimal
+// This file defines the RegAllocNaive function pass, which provides a minimal
 // implementation of the basic register allocator.
 //
 //===----------------------------------------------------------------------===//
@@ -40,8 +40,8 @@ using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
 
-static RegisterRegAlloc basicRegAlloc("ssra", "Sam + Seth's Register Allocator",
-                                      createSSRegisterAllocator);
+static RegisterRegAlloc naiveRegAlloc("ranaive", "Sam + Seth's Naive Register Allocator",
+                                      createNaiveRegisterAllocator);
 
 namespace {
   struct CompSpillWeight {
@@ -52,12 +52,12 @@ namespace {
 }
 
 namespace {
-/// SSRegAlloc provides a minimal implementation of the basic register allocation
+/// RegAllocNaive provides a minimal implementation of the basic register allocation
 /// algorithm. It prioritizes live virtual registers by spill weight and spills
 /// whenever a register is unavailable. This is not practical in production but
 /// provides a useful baseline both for measuring other allocators and comparing
 /// the speed of the basic algorithm against other styles of allocators.
-class SSRegAlloc : public MachineFunctionPass,
+class RegAllocNaive : public MachineFunctionPass,
                 public RegAllocBase,
                 private LiveRangeEdit::Delegate {
   // context
@@ -76,12 +76,12 @@ class SSRegAlloc : public MachineFunctionPass,
   void LRE_WillShrinkVirtReg(unsigned) override;
 
 public:
-  SSRegAlloc();
+  RegAllocNaive();
 
   /// Return the pass name.
   StringRef getPassName() const override { return "Basic Register Allocator"; }
 
-  /// SSRegAlloc analysis usage.
+  /// RegAllocNaive analysis usage.
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
   void releaseMemory() override;
@@ -120,13 +120,13 @@ public:
   static char ID;
 };
 
-char SSRegAlloc::ID = 0;
+char RegAllocNaive::ID = 0;
 
 } // end anonymous namespace
 
-char &llvm::SSRegAllocID = SSRegAlloc::ID;
+char &llvm::RegAllocNaiveID = RegAllocNaive::ID;
 
-INITIALIZE_PASS_BEGIN(SSRegAlloc, "ssregalloc", "Sam + Seth Register Allocator",
+INITIALIZE_PASS_BEGIN(RegAllocNaive, "RegAllocNaive", "Sam + Seth Naive Register Allocator",
                       false, false)
 INITIALIZE_PASS_DEPENDENCY(LiveDebugVariables)
 INITIALIZE_PASS_DEPENDENCY(SlotIndexes)
@@ -138,10 +138,10 @@ INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
 INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
 INITIALIZE_PASS_DEPENDENCY(VirtRegMap)
 INITIALIZE_PASS_DEPENDENCY(LiveRegMatrix)
-INITIALIZE_PASS_END(SSRegAlloc, "ssregalloc", "Sam + Seth Register Allocator", false,
+INITIALIZE_PASS_END(RegAllocNaive, "RegAllocNaive", "Sam + Seth Naive Register Allocator", false,
                     false)
 
-bool SSRegAlloc::LRE_CanEraseVirtReg(unsigned VirtReg) {
+bool RegAllocNaive::LRE_CanEraseVirtReg(unsigned VirtReg) {
   LiveInterval &LI = LIS->getInterval(VirtReg);
   if (VRM->hasPhys(VirtReg)) {
     Matrix->unassign(LI);
@@ -156,7 +156,7 @@ bool SSRegAlloc::LRE_CanEraseVirtReg(unsigned VirtReg) {
   return false;
 }
 
-void SSRegAlloc::LRE_WillShrinkVirtReg(unsigned VirtReg) {
+void RegAllocNaive::LRE_WillShrinkVirtReg(unsigned VirtReg) {
   if (!VRM->hasPhys(VirtReg))
     return;
 
@@ -166,10 +166,10 @@ void SSRegAlloc::LRE_WillShrinkVirtReg(unsigned VirtReg) {
   enqueue(&LI);
 }
 
-SSRegAlloc::SSRegAlloc(): MachineFunctionPass(ID) {
+RegAllocNaive::RegAllocNaive(): MachineFunctionPass(ID) {
 }
 
-void SSRegAlloc::getAnalysisUsage(AnalysisUsage &AU) const {
+void RegAllocNaive::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
   AU.addRequired<AAResultsWrapperPass>();
   AU.addPreserved<AAResultsWrapperPass>();
@@ -193,7 +193,7 @@ void SSRegAlloc::getAnalysisUsage(AnalysisUsage &AU) const {
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
-void SSRegAlloc::releaseMemory() {
+void RegAllocNaive::releaseMemory() {
   SpillerInstance.reset();
 }
 
@@ -201,7 +201,7 @@ void SSRegAlloc::releaseMemory() {
 // Spill or split all live virtual registers currently unified under PhysReg
 // that interfere with VirtReg. The newly spilled or split live intervals are
 // returned by appending them to SplitVRegs.
-bool SSRegAlloc::spillInterferences(LiveInterval &VirtReg, unsigned PhysReg,
+bool RegAllocNaive::spillInterferences(LiveInterval &VirtReg, unsigned PhysReg,
                                  SmallVectorImpl<unsigned> &SplitVRegs) {
   // Record each interference and determine if all are spillable before mutating
   // either the union or live intervals.
@@ -253,7 +253,7 @@ bool SSRegAlloc::spillInterferences(LiveInterval &VirtReg, unsigned PhysReg,
 // |vregs| * |machineregs|. And since the number of interference tests is
 // minimal, there is no value in caching them outside the scope of
 // selectOrSplit().
-unsigned SSRegAlloc::selectOrSplit(LiveInterval &VirtReg,
+unsigned RegAllocNaive::selectOrSplit(LiveInterval &VirtReg,
                                 SmallVectorImpl<unsigned> &SplitVRegs) {
   // Populate a list of physical register spill candidates.
   SmallVector<unsigned, 8> PhysRegSpillCands;
@@ -302,7 +302,7 @@ unsigned SSRegAlloc::selectOrSplit(LiveInterval &VirtReg,
   return 0;
 }
 
-bool SSRegAlloc::runOnMachineFunction(MachineFunction &mf) {
+bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
   LLVM_DEBUG(dbgs() << "********** BASIC REGISTER ALLOCATION **********\n"
                     << "********** Function: " << mf.getName() << '\n');
 
@@ -327,7 +327,7 @@ bool SSRegAlloc::runOnMachineFunction(MachineFunction &mf) {
   return true;
 }
 
-FunctionPass* llvm::createSSRegisterAllocator()
+FunctionPass* llvm::createNaiveRegisterAllocator()
 {
-  return new SSRegAlloc();
+  return new RegAllocNaive();
 }

@@ -115,6 +115,8 @@ add_llvm_library(LLVMCodeGen
   RegAllocFast.cpp
   RegAllocGreedy.cpp
   RegAllocPBQP.cpp
+  RegAllocSS.cpp
+  RegAllocNaive.cpp
   RegisterClassInfo.cpp
   RegisterCoalescer.cpp
   RegisterPressure.cpp
@@ -139,7 +141,6 @@ add_llvm_library(LLVMCodeGen
   SlotIndexes.cpp
   SpillPlacement.cpp
   SplitKit.cpp
-  SSRegAlloc.cpp
   StackColoring.cpp
   StackMapLivenessAnalysis.cpp
   StackMaps.cpp
