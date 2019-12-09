@@ -35,6 +35,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 #include <queue>
+#include <iostream>
 
 using namespace llvm;
 
@@ -79,7 +80,7 @@ public:
   RegAllocNaive();
 
   /// Return the pass name.
-  StringRef getPassName() const override { return "Basic Register Allocator"; }
+  StringRef getPassName() const override { return "Naive Register Allocator"; }
 
   /// RegAllocNaive analysis usage.
   void getAnalysisUsage(AnalysisUsage &AU) const override;
@@ -110,12 +111,6 @@ public:
     return MachineFunctionProperties().set(
         MachineFunctionProperties::Property::NoPHIs);
   }
-
-  // Helper for spilling all live virtual registers currently unified under preg
-  // that interfere with the most recently queried lvr.  Return true if spilling
-  // was successful, and append any new spilled/split intervals to splitLVRs.
-  bool spillInterferences(LiveInterval &VirtReg, unsigned PhysReg,
-                          SmallVectorImpl<unsigned> &SplitVRegs);
 
   static char ID;
 };
@@ -197,50 +192,6 @@ void RegAllocNaive::releaseMemory() {
   SpillerInstance.reset();
 }
 
-
-// Spill or split all live virtual registers currently unified under PhysReg
-// that interfere with VirtReg. The newly spilled or split live intervals are
-// returned by appending them to SplitVRegs.
-bool RegAllocNaive::spillInterferences(LiveInterval &VirtReg, unsigned PhysReg,
-                                 SmallVectorImpl<unsigned> &SplitVRegs) {
-  // Record each interference and determine if all are spillable before mutating
-  // either the union or live intervals.
-  SmallVector<LiveInterval*, 8> Intfs;
-
-  // Collect interferences assigned to any alias of the physical register.
-  for (MCRegUnitIterator Units(PhysReg, TRI); Units.isValid(); ++Units) {
-    LiveIntervalUnion::Query &Q = Matrix->query(VirtReg, *Units);
-    Q.collectInterferingVRegs();
-    for (unsigned i = Q.interferingVRegs().size(); i; --i) {
-      LiveInterval *Intf = Q.interferingVRegs()[i - 1];
-      if (!Intf->isSpillable() || Intf->weight > VirtReg.weight)
-        return false;
-      Intfs.push_back(Intf);
-    }
-  }
-  LLVM_DEBUG(dbgs() << "spilling " << printReg(PhysReg, TRI)
-                    << " interferences with " << VirtReg << "\n");
-  assert(!Intfs.empty() && "expected interference");
-
-  // Spill each interfering vreg allocated to PhysReg or an alias.
-  for (unsigned i = 0, e = Intfs.size(); i != e; ++i) {
-    LiveInterval &Spill = *Intfs[i];
-
-    // Skip duplicates.
-    if (!VRM->hasPhys(Spill.reg))
-      continue;
-
-    // Deallocate the interfering vreg by removing it from the union.
-    // A LiveInterval instance may not be in a union during modification!
-    Matrix->unassign(Spill);
-
-    // Spill the extracted interval.
-    LiveRangeEdit LRE(&Spill, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
-    spiller().spill(LRE);
-  }
-  return true;
-}
-
 // Driver for the register assignment and splitting heuristics.
 // Manages iteration over the LiveIntervalUnions.
 //
@@ -258,59 +209,42 @@ unsigned RegAllocNaive::selectOrSplit(LiveInterval &VirtReg,
   // Populate a list of physical register spill candidates.
   SmallVector<unsigned, 8> PhysRegSpillCands;
 
-  // Check for an available register in this class.
-  AllocationOrder Order(VirtReg.reg, *VRM, RegClassInfo, Matrix);
-  while (unsigned PhysReg = Order.next()) {
-    // Check for interference in PhysReg
-    switch (Matrix->checkInterference(VirtReg, PhysReg)) {
-    case LiveRegMatrix::IK_Free:
-      // PhysReg is available, allocate it.
-      return PhysReg;
-
-    case LiveRegMatrix::IK_VirtReg:
-      // Only virtual registers in the way, we may be able to spill them.
-      PhysRegSpillCands.push_back(PhysReg);
-      continue;
-
-    default:
-      // RegMask or RegUnit interference.
-      continue;
-    }
-  }
-
-  // Try to spill another interfering reg with less spill weight.
-  for (SmallVectorImpl<unsigned>::iterator PhysRegI = PhysRegSpillCands.begin(),
-       PhysRegE = PhysRegSpillCands.end(); PhysRegI != PhysRegE; ++PhysRegI) {
-    if (!spillInterferences(VirtReg, *PhysRegI, SplitVRegs))
-      continue;
-
-    assert(!Matrix->checkInterference(VirtReg, *PhysRegI) &&
-           "Interference after spill.");
-    // Tell the caller to allocate to this newly freed physical register.
-    return *PhysRegI;
-  }
-
   // No other spill candidates were found, so spill the current VirtReg.
   LLVM_DEBUG(dbgs() << "spilling: " << VirtReg << '\n');
-  if (!VirtReg.isSpillable())
-    return ~0u;
+  if (!VirtReg.isSpillable()) {
+    // SETH_DEBUG << "Virtual register not spillable" << std::endl;
+    // return ~0u;
+    AllocationOrder Order(VirtReg.reg, *VRM, RegClassInfo, Matrix);
+    while (unsigned PhysReg = Order.next()) {
+      // Check for interference in PhysReg
+      switch (Matrix->checkInterference(VirtReg, PhysReg)) {
+      case LiveRegMatrix::IK_Free:
+        // PhysReg is available, allocate it.
+        SS_DEBUG << "Allocating Physical Register " << PhysReg << std::endl;
+        return PhysReg;
+      default:
+        continue;
+      }
+    }
+  }
   LiveRangeEdit LRE(&VirtReg, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   spiller().spill(LRE);
 
   // The live virtual register requesting allocation was spilled, so tell
   // the caller not to allocate anything during this round.
+  SS_DEBUG << "Live virtual register requesting allocation was spilled" << std::endl;
   return 0;
 }
 
 bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
-  LLVM_DEBUG(dbgs() << "********** BASIC REGISTER ALLOCATION **********\n"
+  LLVM_DEBUG(dbgs() << "********** NAIVE REGISTER ALLOCATION (spill all registers) **********\n"
                     << "********** Function: " << mf.getName() << '\n');
 
   MF = &mf;
+  MF->dump();  SS_DEBUG << std::endl;
   RegAllocBase::init(getAnalysis<VirtRegMap>(),
                      getAnalysis<LiveIntervals>(),
                      getAnalysis<LiveRegMatrix>());
-
   calculateSpillWeightsAndHints(*LIS, *MF, VRM,
                                 getAnalysis<MachineLoopInfo>(),
                                 getAnalysis<MachineBlockFrequencyInfo>());
@@ -319,6 +253,8 @@ bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
 
   allocatePhysRegs();
   postOptimization();
+
+  MF->dump();  SS_DEBUG << std::endl;
 
   // Diagnostic output before rewriting
   LLVM_DEBUG(dbgs() << "Post alloc VirtRegMap:\n" << *VRM << "\n");

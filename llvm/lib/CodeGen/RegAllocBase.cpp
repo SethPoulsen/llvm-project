@@ -88,6 +88,8 @@ void RegAllocBase::allocatePhysRegs() {
   // Continue assigning vregs one at a time to available physical registers.
   while (LiveInterval *VirtReg = dequeue()) {
     assert(!VRM->hasPhys(VirtReg->reg) && "Register already assigned");
+    SS_DEBUG << "Trying to assign vreg to phys reg" << std::endl;
+    VirtReg->dump();
 
     // Unused registers can appear when the spiller coalesces snippets.
     if (MRI->reg_nodbg_empty(VirtReg->reg)) {

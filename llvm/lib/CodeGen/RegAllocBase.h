@@ -38,6 +38,9 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/CodeGen/RegisterClassInfo.h"
+#include <iostream>
+
+#define SS_DEBUG std::cerr << "SS DEBUG "
 
 namespace llvm {
 
