@@ -1,18 +1,22 @@
 #include <math.h>
 #include <stdio.h>
+#include <assert.h>
 
-float quadratic(float a, float b, float c) {
+float quadratic(double a, double b, double c) {
 
-    float denom = (2 * a);
+    double denom = (2 * a);
 
-    float num = -b + sqrt(pow(b, 2) - (4 * a * c) );
+    double num = -b + sqrt(pow(b, 2) - (4 * a * c) );
 
-    float x = num / denom;
+    double x = num / denom;
 
     return x;
 }
 
 int main() {
-    int x = quadratic(3,4,5);
+    for (unsigned long i = 0; i < 100000000L; ++i) {
+        double x = quadratic(3, -4, -5);   
+        assert(x > 2.10 && x < 2.12 || "Wrong Answer!!!");
+    }
     return 0;
 }

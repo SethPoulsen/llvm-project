@@ -11,7 +11,7 @@ fileNames = [path.basename(x)[:-2] for x in os.listdir("./") if x[-2:] == ".c"]
 # fileNames.append("nonexistent_file")
 def benchmarkFile(fileName): 
     # print(fileName)
-    result = sp.run(["clang", "-c", "-emit-llvm", fileName + ".c"])
+    result = sp.run(["clang", "-c", "-emit-llvm", fileName + ".c", "-g"])
     if result.returncode != 0: 
         raise Exception("Failed to convert " + fileName + " to bitcode")
 
@@ -29,9 +29,8 @@ def benchmarkFile(fileName):
         times = []
         for i in range(0, test_runs):
             args = ["/usr/bin/time", r'--format=%U, %S, %E', "./a.out"]
-            result = sp.run(args, capture_output=True)
+            result = sp.run(args, capture_output=True, check=True)
             time = result.stderr.decode("utf-8").split(",")[0]
-            print(time)
             times.append(float(time))
         averages.append(sum(times) / len(times))
 
