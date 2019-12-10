@@ -171,6 +171,7 @@ void RegAllocNaive::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<LiveIntervals>();
   AU.addPreserved<LiveIntervals>();
   AU.addPreserved<SlotIndexes>();
+  AU.addRequired<SlotIndexes>();
   AU.addRequired<LiveDebugVariables>();
   AU.addPreserved<LiveDebugVariables>();
   AU.addRequired<LiveStacks>();
@@ -241,7 +242,9 @@ bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
                     << "********** Function: " << mf.getName() << '\n');
 
   MF = &mf;
-  MF->dump();  SS_DEBUG << std::endl;
+  SlotIndexes& slotIndexes = getAnalysis<SlotIndexes>();
+  MF->print(dbgs(), &slotIndexes);
+  SS_DEBUG << std::endl;
   RegAllocBase::init(getAnalysis<VirtRegMap>(),
                      getAnalysis<LiveIntervals>(),
                      getAnalysis<LiveRegMatrix>());
