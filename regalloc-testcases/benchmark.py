@@ -1,45 +1,71 @@
-#!/usr/bin/python3.8
+#!/usr/bin/env python3.8
 
-import os 
+import asyncio
+from glob import glob
 import subprocess as sp
-from os import path
+import sys
 
 register_allocators = ["ranaive", "rass", "basic", "greedy", "fast", "pbqp"]
 test_runs = 5
-fileNames = [path.basename(x)[:-2] for x in os.listdir("./") if x[-2:] == ".c"]
-# print(fileNames)
-# fileNames.append("nonexistent_file")
-def benchmarkFile(fileName): 
-    # print(fileName)
-    result = sp.run(["clang", "-c", "-emit-llvm", fileName + ".c", "-g"])
-    if result.returncode != 0: 
-        raise Exception("Failed to convert " + fileName + " to bitcode")
+fileNames = [fileName[:-2] for fileName in glob('*.c')]
 
-    averages = []
-    for allocator in register_allocators:
-        result = sp.run(["../build/bin/llc", fileName + ".bc", "-regalloc=" + allocator])
-        if result.returncode != 0:
-            raise Exception("Failed to generate assembly.")
+async def async_run(cmd, capture_output=False, check=False):
+    '''this is a clone of subprocess.run that is async'''
+    stdout = asyncio.subprocess.PIPE if capture_output else None
+    stderr = stdout
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=stdout, stderr=stderr)
+    stdout, stderr = await proc.communicate()
+    if check:
+        if proc.returncode != 0:
+            if stderr:
+                sys.stderr.write(stderr.decode())
+            raise RuntimeError(f'{cmd!r} returned non-zero ({proc.returncode})')
+    return sp.CompletedProcess(cmd, proc.returncode,
+                               stdout=stdout, stderr=stderr)
 
-        # assembly -> binary
-        result = sp.run(["clang", fileName + ".s", "-lm"])
-        if result.returncode != 0:
-            raise Exception("Failed to create binary from assembly.")
+async def benchmark(fileNames):
+    return await asyncio.gather(*map(benchmark_file, fileNames))
 
-        times = []
-        for i in range(0, test_runs):
-            args = ["/usr/bin/time", r'--format=%U, %S, %E', "./a.out"]
-            result = sp.run(args, capture_output=True, check=True)
-            time = result.stderr.decode("utf-8").split(",")[0]
-            times.append(float(time))
-        averages.append(sum(times) / len(times))
+async def benchmark_file(fileName):
+    await async_run(["clang", "-c", "-emit-llvm", fileName + ".c",],
+                    capture_output=True, check=True)
+    return await asyncio.gather(*[benchmark_allocator(fileName, allocator)
+                                  for allocator in register_allocators])
 
-    return fileName, averages
-    
+async def benchmark_allocator(fileName, allocator):
+    asm_name = f'./{fileName}_{allocator}.s'
+    bin_name = f'./{fileName}_{allocator}.exe'
+    await async_run(["../build/bin/llc",
+                     fileName + ".bc",
+                     "-regalloc=" + allocator,
+                     '-o',
+                     asm_name],
+                    capture_output=True, check=True)
+    # assembly -> binary
+    await async_run(["clang", asm_name, "-lm", '-o', bin_name],
+                    capture_output=True, check=True)
+    times = await asyncio.gather(*[benchmark_allocator_once(bin_name)
+                                   for _ in range(0, test_runs)])
+    return average(times)
 
-output = "test-case, " + ", ".join(register_allocators) + "\n"
+def average(times):
+    return sum(times) / len(times)
 
-for fileName, results in map(benchmarkFile, fileNames): 
-    output += fileName + ", " + ", ".join(map(str, results)) + "\n"
+async def benchmark_allocator_once(bin_name):
+    args = ["/usr/bin/time", r'--format=%U,%S,%E', bin_name]
+    result = await async_run(args, capture_output=True, check=True)
+    time = float(result.stderr.decode("utf-8").split(",")[0])
+    return time
 
-print(output)
+def table(lists, size=15):
+    row_format = f'{{:>{size}}}' * len(lists[0])
+    for list_ in lists:
+        print(row_format.format(*list_))
+
+if __name__ == '__main__':
+    output = [['test-case', *register_allocators]]
+    results = asyncio.run(benchmark(fileNames))
+    for fileName, results in zip(fileNames, results):
+        results = [round(result, 3) for result in results]
+        output.append([fileName, *results])
+    table(output)
