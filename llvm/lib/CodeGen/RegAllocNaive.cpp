@@ -32,6 +32,7 @@
 #include "llvm/PassAnalysisSupport.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/Statistic.h"
 #include <cstdlib>
 #include <queue>
 #include <iostream>
@@ -39,6 +40,8 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
+
+STATISTIC(NumNewQueued    , "Number of new live ranges queued");
 
 static RegisterRegAlloc naiveRegAlloc("ranaive", "Sam + Seth's Naive Register Allocator",
                                       createNaiveRegisterAllocator);
@@ -191,7 +194,48 @@ bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
 
   SpillerInstance.reset(createInlineSpiller(*this, *MF, *VRM));
 
-  allocatePhysRegs();
+  // allocatePhysRegs();
+    // seedLiveRegs();
+  for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
+    unsigned Reg = TargetRegisterInfo::index2VirtReg(i);
+    if (MRI->reg_nodbg_empty(Reg))
+      continue;
+    enqueue(&LIS->getInterval(Reg));
+  }
+
+  // Continue assigning vregs one at a time to available physical registers.
+  while (LiveInterval *VirtReg = dequeue()) {
+    SS_DEBUG << "Trying to assign vreg to phys reg" << std::endl;
+    VirtReg->dump();
+
+    // Unused registers can appear when the spiller coalesces snippets.
+    if (MRI->reg_nodbg_empty(VirtReg->reg)) {
+      LLVM_DEBUG(dbgs() << "Dropping unused " << *VirtReg << '\n');
+      aboutToRemoveInterval(*VirtReg);
+      LIS->removeInterval(VirtReg->reg);
+      continue;
+    }
+
+    // Invalidate all interference queries, live ranges could have changed.
+    Matrix->invalidateVirtRegs();
+
+    SmallVector<unsigned, 4> SplitVRegs;
+    unsigned AvailablePhysReg = selectOrSplit(*VirtReg, SplitVRegs);
+
+    if (AvailablePhysReg)
+      Matrix->assign(*VirtReg, AvailablePhysReg);
+
+    for (unsigned Reg : SplitVRegs) {
+      SS_DEBUG << "Split VReg " << Reg << std::endl;
+      LiveInterval *SplitVirtReg = &LIS->getInterval(Reg);
+      if (MRI->reg_nodbg_empty(SplitVirtReg->reg)) {
+        LIS->removeInterval(SplitVirtReg->reg);
+        continue;
+      }
+      enqueue(SplitVirtReg);
+      ++NumNewQueued;
+    }
+  }
   postOptimization();
 
   MF->dump();  SS_DEBUG << std::endl;

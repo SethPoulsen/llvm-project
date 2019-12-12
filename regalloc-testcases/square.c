@@ -2,7 +2,8 @@
 #include <stdio.h>
 
 float square(float a) {
-    return a * a;
+    float square = a * a;
+    return square;
 }
 
 int main() {

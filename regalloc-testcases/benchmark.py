@@ -6,6 +6,7 @@ import subprocess as sp
 import sys
 import re
 
+# register_allocators = ["ranaive"]
 register_allocators = ["ranaive", "rass", "basic", "greedy", "fast", "pbqp"]
 test_runs = 5
 fileNames = [fileName[:-2] for fileName in glob('*.c')]

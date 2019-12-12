@@ -18,10 +18,7 @@ source="$(echo """${2:-quadratic.c}""" | head -c -3)"
 
 echo "compiling ${source} with ${regalloc}"
 
-clang -c -emit-llvm "${source}.c" -o "${source}.bc"
-# In RegAlloc*.cpp:
-# if (VerifyEnabled)
-#   MF->verify(this, "After splitting live range around region");
-../build/bin/llc -regalloc="${regalloc}" -verify-regalloc "${source}.bc" -o "${source}.s"
+clang -c -emit-llvm "${source}.c" -o "${source}.bc" -g
+../build/bin/llc -regalloc="${regalloc}" "${source}.bc" -o "${source}.s" -verify-regalloc -stats
 clang "${source}.s" -lm -o "${source}.exe"
 "./${source}.exe"
