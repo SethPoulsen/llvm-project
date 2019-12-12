@@ -1,3 +1,5 @@
+#!/usr/bin/env python3.8
+
 import random
 
 n = 5
@@ -20,7 +22,9 @@ int magic(int {', int '.join(arg_names)}) {{
 }}
 
 int main() {{
-    assert(magic({','.join(map(str, arg_vals))}) == {sum_val});
+    for (unsigned long i = 0; i < 100000000L; ++i) {{
+        assert(magic({','.join(map(str, arg_vals))}) == {sum_val});
+    }}
     return 0;
 }}
 ''')
