@@ -1,5 +1,11 @@
 #include <cassert>
 #include <vector>
+#include <utility>
+#include <unordered_map>
+#include <set>
+#include <stack>
+#include <functional>
+#include <algorithm>
 
 #include "LiveDebugVariables.h"
 #include "Spiller.h"
@@ -51,8 +57,6 @@ namespace {
     const LiveRegMatrix* LRM;
     RegisterClassInfo* RCI;
 
-    std::queue<VirtReg> regs;
-
     std::vector<MCPhysReg> get_preferred_phys_regs(VirtReg reg);
 
     std::vector<VirtReg> get_all_virt_regs();
@@ -102,6 +106,84 @@ namespace {
 
   };
 
+  class interference_graph {
+  private:
+    std::unordered_map<VirtReg, std::set<VirtReg>> neighbors;
+    std::unordered_map<VirtReg, MCPhysReg> colors;
+    const LiveIntervals& LIS;
+
+    void insert(VirtReg reg1) {
+      dbgs() << "Insert " << reg1 << ": ";
+      for (const auto& pair : neighbors) {
+	VirtReg reg2 = pair.first;
+	if (LIS.getInterval(reg1).overlaps(LIS.getInterval(reg2))) {
+	  dbgs() << reg2 << " ";
+	  neighbors[reg1].insert(reg2);
+	  neighbors[reg2].insert(reg1);
+	}
+      }
+      dbgs() << "\n";
+    }
+
+  public:
+
+    interference_graph(const std::vector<VirtReg>& virt_regs, const LiveIntervals& _LIS)
+      : LIS(_LIS) {
+      for (VirtReg virt_reg1 : virt_regs) {
+	// initialize the nieghbor list for this one
+	neighbors[virt_reg1];
+      }
+      for (VirtReg virt_reg1 : virt_regs) {
+	insert(virt_reg1);
+      }
+    }
+
+    std::pair<bool, VirtReg> get_less_than_k(unsigned int k) {
+      for (const auto& pair : neighbors) {
+	if (pair.second.size() < k) {
+	  return {true, pair.first};
+	}
+      }
+      return {false, 0};
+    }
+
+    VirtReg get_max_node(std::function<bool(VirtReg, VirtReg)> func) {
+      using pair = std::pair<VirtReg, std::set<VirtReg>>;
+      const auto& m = std::min_element(neighbors.cbegin(), neighbors.cend(),
+				       [&func](const pair& r1, const pair& r2) { return func(r1.first, r2.first); });
+      return m->first;
+    }
+
+    void remove(VirtReg reg) {
+      for (VirtReg neighbor : neighbors[reg]) {
+	neighbors[neighbor].erase(reg);
+      }
+      neighbors.erase(reg);
+    }
+
+    std::pair<bool, MCPhysReg> maybe_insert_and_color(VirtReg reg, const std::vector<MCPhysReg>& phys_regs) {
+      insert(reg);
+      std::set<MCPhysReg> possible_colors {phys_regs.cbegin(), phys_regs.cend()};
+      for (VirtReg neighbor : neighbors[reg]) {
+	if (colors.count(neighbor) != 0) {
+	  possible_colors.erase(colors[neighbor]);
+	}
+      }
+      for (MCPhysReg color : possible_colors) {
+	// in the loop
+	// found a color
+	colors[reg] = color;
+	return {true, color};
+      }
+      // no color found :'(
+      return {false, 0};
+    }
+
+    bool empty() {
+      return neighbors.empty();
+    }
+  };
+
 } // end anonymous namespace
 
 char RegAllocSS::ID = 0;
@@ -123,7 +205,7 @@ INITIALIZE_PASS_DEPENDENCY(LiveRegMatrix)
 INITIALIZE_PASS_END(RegAllocSS, "RegAllocSS", "Sam + Seth Register Allocator",
 		    false, false)
 
-bool RABasic::LRE_CanEraseVirtReg(unsigned VirtReg) {
+bool RegAllocSS::LRE_CanEraseVirtReg(unsigned VirtReg) {
   LiveInterval &LI = LIS->getInterval(VirtReg);
   if (VRM->hasPhys(VirtReg)) {
     return true;
@@ -137,13 +219,12 @@ bool RABasic::LRE_CanEraseVirtReg(unsigned VirtReg) {
   return false;
 }
 
-void RABasic::LRE_WillShrinkVirtReg(unsigned VirtReg) {
-  if (!VRM->hasPhys(VirtReg))
-    return;
+void RegAllocSS::LRE_WillShrinkVirtReg(unsigned VirtReg) {
+  // if (!VRM->hasPhys(VirtReg))
+  //   return;
 
   // Register is assigned, put it back on the queue for reassignment.
   // regs.push(VirtReg);
-  VRM.assign
 }
 
 // returns a list of possible physical registers in preferred order
@@ -190,32 +271,63 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
   SmallPtrSet<MachineInstr *, 32> DeadRemats;
   std::vector<VirtReg> virt_regs = get_all_virt_regs();
   using VirtRegVec = SmallVector<unsigned, 4>;
+  interference_graph graph {virt_regs, *LIS};
+  std::stack<VirtReg> stack;
 
   ///// Preparation /////
+
   MRI->freezeReservedRegs(*MF);
   RCI->runOnMachineFunction(*MF);
-
+  size_t k = get_preferred_phys_regs(virt_regs[0]).size();
   for (VirtReg virt_reg : virt_regs) {
-    regs.push(virt_reg);
+    k = std::min(k, get_preferred_phys_regs(virt_reg).size());
+  }
+  dbgs() << "k " << k << "\n";
+
+
+  ///// Initial pass through all virt_regs /////
+
+  while (!graph.empty()) {
+    auto maybe_reg = graph.get_less_than_k(k);
+    if (maybe_reg.first) {
+      dbgs() << "less than k chose: " << maybe_reg.second << "\n";
+      graph.remove(maybe_reg.second);
+      stack.push(maybe_reg.second);
+    } else {
+      auto comparison = [](VirtReg r1, VirtReg r2) { return r1 < r2; };
+      VirtReg reg = graph.get_max_node(comparison);
+      dbgs() << "heuristic chose: " << reg << "\n";
+      graph.remove(reg);
+      stack.push(reg);
+    }
   }
 
-  ///// Initial pass through virt_regs /////
-  while (!regs.empty()) {
-    Virtreg virt_reg = reg.front();
-    reg.pop();
+  ///// Initial pass through stack /////
 
-    // according to comment in RegAllocBase.cpp:
-    // > Unused registers can appear when the spiller coalesces snippets.
-    if (!MRI->reg_nodbg_empty(virt_reg)) {
-      MCPhysReg phys_reg = get_preferred_phys_regs(virt_reg)[0];
+  while (!stack.empty()) {
+    VirtReg virt_reg = stack.top();
+    stack.pop();
 
-      // VRM->assignVirt2StackSlot(virt_reg);
-      // VRM->assignVirt2Phys(virt_reg, phys_reg);
+    dbgs() << "popped " << virt_reg << "\n";
 
-      VirtRegVec SplitVRegs;
-      LiveInterval& LI = LIS->getInterval(virt_reg);
-      LiveRangeEdit LRE {&LI, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats};
-      spiller->spill(LRE);
+    if (!VRM->hasPhys(virt_reg)
+	// && !MRI->reg_nodbg_empty(virt_reg)
+	) {
+      auto maybe_color = graph.maybe_insert_and_color(virt_reg, get_preferred_phys_regs(virt_reg));
+      if (maybe_color.first) {
+	dbgs() << "colored " << virt_reg << "\n";
+	VRM->assignVirt2Phys(virt_reg, maybe_color.second);
+      } else {
+	dbgs() << "failed on " << virt_reg << "\n";
+	VirtRegVec SplitVRegs;
+	LiveInterval& LI = LIS->getInterval(virt_reg);
+	LiveRangeEdit LRE {&LI, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats};
+	spiller->spill(LRE);
+	for (VirtReg new_reg : SplitVRegs) {
+	  stack.push(new_reg);
+	  dbgs() << "redoing " << new_reg << "\n";
+	}
+      }
     }
   }
 
@@ -228,6 +340,10 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
   DeadRemats.clear();
   // delete spiller;
   delete RCI;
+
+  for (VirtReg virt_reg : virt_regs) {
+    assert(VRM->hasPhys(virt_reg));
+  }
 
   ///// Error reporting /////
   // TODO: make this happen when VerifyEnabled
