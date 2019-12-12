@@ -1,19 +1,19 @@
+#include <algorithm>
 #include <cassert>
-#include <vector>
-#include <utility>
-#include <unordered_map>
+#include <functional>
 #include <set>
 #include <stack>
-#include <functional>
-#include <algorithm>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "LiveDebugVariables.h"
 #include "Spiller.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/CodeGen/LiveStacks.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
+#include "llvm/CodeGen/LiveStacks.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -23,9 +23,9 @@
 #include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/SlotIndexes.h"
 #include "llvm/CodeGen/VirtRegMap.h"
+#include "llvm/IR/Function.h"
 #include "llvm/Pass.h"
 #include "llvm/PassSupport.h"
-#include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -33,170 +33,167 @@ using namespace llvm;
 #define DEBUG_TYPE "regalloc"
 
 static RegisterRegAlloc ssRegAlloc("rass", "Sam + Seth's Register Allocator",
-				   createSSRegisterAllocator);
+                                   createSSRegisterAllocator);
 
 namespace {
 
-  using VirtReg = unsigned int;
+using VirtReg = unsigned int;
 
-  std::string virtReg2str(VirtReg reg) {
-    static const std::string alphabet = "abcdefghijklmnopqrstuvwxyz";
-    VirtReg reduced_reg = (reg - 2147483648);
-    std::string out = "";
-    while (reduced_reg > 0) {
-      unsigned letter_no = reduced_reg % alphabet.size();
-      reduced_reg /= alphabet.size();
-      out = alphabet[letter_no] + out;
-    }
-    return out;
+std::string virtReg2str(VirtReg reg) {
+  static const std::string alphabet = "abcdefghijklmnopqrstuvwxyz";
+  VirtReg reduced_reg = (reg - 2147483648);
+  std::string out = "";
+  while (reduced_reg > 0) {
+    unsigned letter_no = reduced_reg % alphabet.size();
+    reduced_reg /= alphabet.size();
+    out = alphabet[letter_no] + out;
+  }
+  return out;
+}
+
+// https://llvm.org/doxygen/classllvm_1_1MachineFunctionPass.html
+class RegAllocSS : public MachineFunctionPass, private LiveRangeEdit::Delegate {
+private:
+  MachineFunction *MF;
+  MachineRegisterInfo *MRI;
+  const MachineFrameInfo *MFI;
+  const TargetSubtargetInfo *STI;
+
+  const TargetRegisterInfo *TRI;
+  const TargetInstrInfo *TII;
+
+  VirtRegMap *VRM;
+  LiveIntervals *LIS;
+  LiveRegMatrix *LRM;
+  RegisterClassInfo *RCI;
+
+  std::vector<MCPhysReg> get_preferred_phys_regs(VirtReg reg);
+
+  std::vector<VirtReg> get_all_virt_regs();
+
+public:
+  static char ID;
+
+  RegAllocSS() : MachineFunctionPass(ID) {}
+
+  StringRef getPassName() const override { return "SS Register Allocator"; }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const {
+    // TODO: prune these
+    AU.setPreservesCFG();
+    AU.addRequired<AAResultsWrapperPass>();
+    AU.addPreserved<AAResultsWrapperPass>();
+    AU.addRequired<LiveIntervals>();
+    AU.addPreserved<LiveIntervals>();
+    AU.addPreserved<SlotIndexes>();
+    AU.addRequired<LiveDebugVariables>();
+    AU.addPreserved<LiveDebugVariables>();
+    AU.addRequired<LiveStacks>();
+    AU.addPreserved<LiveStacks>();
+    AU.addRequired<MachineBlockFrequencyInfo>();
+    AU.addPreserved<MachineBlockFrequencyInfo>();
+    AU.addRequiredID(MachineDominatorsID);
+    AU.addPreservedID(MachineDominatorsID);
+    AU.addRequired<MachineLoopInfo>();
+    AU.addPreserved<MachineLoopInfo>();
+    AU.addRequired<VirtRegMap>();
+    AU.addPreserved<VirtRegMap>();
+    AU.addRequired<LiveRegMatrix>();
+    AU.addPreserved<LiveRegMatrix>();
+    MachineFunctionPass::getAnalysisUsage(AU);
   }
 
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().set(
+        MachineFunctionProperties::Property::NoPHIs);
+  }
 
-  // https://llvm.org/doxygen/classllvm_1_1MachineFunctionPass.html
-  class RegAllocSS : public MachineFunctionPass,
-                     private LiveRangeEdit::Delegate  {
-  private:
+  bool runOnMachineFunction(MachineFunction &MF);
 
-    MachineFunction* MF;
-    MachineRegisterInfo* MRI;
-    const MachineFrameInfo* MFI;
-    const TargetSubtargetInfo* STI;
+  bool LRE_CanEraseVirtReg(unsigned) override;
+  void LRE_WillShrinkVirtReg(unsigned) override;
+};
 
-    const TargetRegisterInfo* TRI;
-    const TargetInstrInfo* TII;
+class interference_graph {
+private:
+  std::unordered_map<VirtReg, std::set<VirtReg>> neighbors;
+  std::unordered_map<VirtReg, MCPhysReg> colors;
+  const LiveIntervals &LIS;
 
-    VirtRegMap* VRM;
-    LiveIntervals* LIS;
-    const LiveRegMatrix* LRM;
-    RegisterClassInfo* RCI;
-
-    std::vector<MCPhysReg> get_preferred_phys_regs(VirtReg reg);
-
-    std::vector<VirtReg> get_all_virt_regs();
-
-  public:
-
-    static char ID;
-
-    RegAllocSS() : MachineFunctionPass(ID) {}
-
-    StringRef getPassName() const override { return "SS Register Allocator"; }
-
-    void getAnalysisUsage(AnalysisUsage &AU) const {
-      // TODO: prune these
-      AU.setPreservesCFG();
-      AU.addRequired<AAResultsWrapperPass>();
-      AU.addPreserved<AAResultsWrapperPass>();
-      AU.addRequired<LiveIntervals>();
-      AU.addPreserved<LiveIntervals>();
-      AU.addPreserved<SlotIndexes>();
-      AU.addRequired<LiveDebugVariables>();
-      AU.addPreserved<LiveDebugVariables>();
-      AU.addRequired<LiveStacks>();
-      AU.addPreserved<LiveStacks>();
-      AU.addRequired<MachineBlockFrequencyInfo>();
-      AU.addPreserved<MachineBlockFrequencyInfo>();
-      AU.addRequiredID(MachineDominatorsID);
-      AU.addPreservedID(MachineDominatorsID);
-      AU.addRequired<MachineLoopInfo>();
-      AU.addPreserved<MachineLoopInfo>();
-      AU.addRequired<VirtRegMap>();
-      AU.addPreserved<VirtRegMap>();
-      AU.addRequired<LiveRegMatrix>();
-      AU.addPreserved<LiveRegMatrix>();
-      MachineFunctionPass::getAnalysisUsage(AU);
-    }
-
-    MachineFunctionProperties getRequiredProperties() const override {
-      return MachineFunctionProperties().set(
-          MachineFunctionProperties::Property::NoPHIs);
-    }
-
-    bool runOnMachineFunction(MachineFunction &MF);
-
-    bool LRE_CanEraseVirtReg(unsigned) override;
-    void LRE_WillShrinkVirtReg(unsigned) override;
-
-  };
-
-  class interference_graph {
-  private:
-    std::unordered_map<VirtReg, std::set<VirtReg>> neighbors;
-    std::unordered_map<VirtReg, MCPhysReg> colors;
-    const LiveIntervals& LIS;
-
-    void insert(VirtReg reg1) {
-      dbgs() << "Insert " << virtReg2str(reg1) << ": ";
-      for (const auto& pair : neighbors) {
-	VirtReg reg2 = pair.first;
-	if (reg1 != reg2 && LIS.getInterval(reg1).overlaps(LIS.getInterval(reg2))) {
-	  dbgs() << virtReg2str(reg2) << " ";
-	  neighbors[reg1].insert(reg2);
-	  neighbors[reg2].insert(reg1);
-	}
+  void insert(VirtReg reg1) {
+    dbgs() << "Insert " << virtReg2str(reg1) << ": ";
+    for (const auto &pair : neighbors) {
+      VirtReg reg2 = pair.first;
+      if (reg1 != reg2 &&
+          LIS.getInterval(reg1).overlaps(LIS.getInterval(reg2))) {
+        dbgs() << virtReg2str(reg2) << " ";
+        neighbors[reg1].insert(reg2);
+        neighbors[reg2].insert(reg1);
       }
-      dbgs() << "\n";
     }
+    dbgs() << "\n";
+  }
 
-  public:
-
-    interference_graph(const std::vector<VirtReg>& virt_regs, const LiveIntervals& _LIS)
+public:
+  interference_graph(const std::vector<VirtReg> &virt_regs,
+                     const LiveIntervals &_LIS)
       : LIS(_LIS) {
-      for (VirtReg virt_reg1 : virt_regs) {
-	// initialize the nieghbor list for this one
-	neighbors[virt_reg1];
-      }
-      for (VirtReg virt_reg1 : virt_regs) {
-	insert(virt_reg1);
-      }
+    for (VirtReg virt_reg1 : virt_regs) {
+      // initialize the nieghbor list for this one
+      neighbors[virt_reg1];
     }
+    for (VirtReg virt_reg1 : virt_regs) {
+      insert(virt_reg1);
+    }
+  }
 
-    std::pair<bool, VirtReg> get_less_than_k(unsigned int k) {
-      for (const auto& pair : neighbors) {
-	if (pair.second.size() < k) {
-	  return {true, pair.first};
-	}
+  std::pair<bool, VirtReg> get_less_than_k(unsigned int k) {
+    for (const auto &pair : neighbors) {
+      if (pair.second.size() < k) {
+        return {true, pair.first};
       }
-      return {false, 0};
     }
+    return {false, 0};
+  }
 
-    VirtReg get_max_node(std::function<bool(VirtReg, VirtReg)> func) {
-      using pair = std::pair<VirtReg, std::set<VirtReg>>;
-      const auto& m = std::min_element(neighbors.cbegin(), neighbors.cend(),
-				       [&func](const pair& r1, const pair& r2) { return func(r1.first, r2.first); });
-      return m->first;
+  VirtReg get_max_node(std::function<bool(VirtReg, VirtReg)> func) {
+    using pair = std::pair<VirtReg, std::set<VirtReg>>;
+    const auto &m = std::min_element(neighbors.cbegin(), neighbors.cend(),
+                                     [&func](const pair &r1, const pair &r2) {
+                                       return func(r1.first, r2.first);
+                                     });
+    return m->first;
+  }
+
+  void remove(VirtReg reg) {
+    for (VirtReg neighbor : neighbors[reg]) {
+      neighbors[neighbor].erase(reg);
     }
+    neighbors.erase(reg);
+  }
 
-    void remove(VirtReg reg) {
-      for (VirtReg neighbor : neighbors[reg]) {
-	neighbors[neighbor].erase(reg);
+  std::pair<bool, MCPhysReg>
+  maybe_insert_and_color(VirtReg reg, const std::vector<MCPhysReg> &phys_regs) {
+    insert(reg);
+    std::set<MCPhysReg> possible_colors{phys_regs.cbegin(), phys_regs.cend()};
+    for (VirtReg neighbor : neighbors[reg]) {
+      if (colors.count(neighbor) != 0) {
+        possible_colors.erase(colors[neighbor]);
       }
-      neighbors.erase(reg);
     }
+    for (MCPhysReg color : possible_colors) {
+      // in the loop
+      // found a color
+      dbgs() << "colored " << virtReg2str(reg) << " " << color << "\n";
+      colors[reg] = color;
+      return {true, color};
+    }
+    // no color found :'(
+    return {false, 0};
+  }
 
-    std::pair<bool, MCPhysReg> maybe_insert_and_color(VirtReg reg, const std::vector<MCPhysReg>& phys_regs) {
-      insert(reg);
-      std::set<MCPhysReg> possible_colors {phys_regs.cbegin(), phys_regs.cend()};
-      for (VirtReg neighbor : neighbors[reg]) {
-	if (colors.count(neighbor) != 0) {
-	  possible_colors.erase(colors[neighbor]);
-	}
-      }
-      for (MCPhysReg color : possible_colors) {
-	// in the loop
-	// found a color
-	dbgs() << "colored " << virtReg2str(reg) << " " << color << "\n";
-	colors[reg] = color;
-	return {true, color};
-      }
-      // no color found :'(
-      return {false, 0};
-    }
-
-    bool empty() {
-      return neighbors.empty();
-    }
-  };
+  bool empty() { return neighbors.empty(); }
+};
 
 } // end anonymous namespace
 
@@ -217,11 +214,11 @@ INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
 INITIALIZE_PASS_DEPENDENCY(VirtRegMap)
 INITIALIZE_PASS_DEPENDENCY(LiveRegMatrix)
 INITIALIZE_PASS_END(RegAllocSS, "RegAllocSS", "Sam + Seth Register Allocator",
-		    false, false)
+                    false, false)
 
 bool RegAllocSS::LRE_CanEraseVirtReg(unsigned VirtReg) {
   return true;
-  
+
   // LiveInterval &LI = LIS->getInterval(VirtReg);
   // if (VRM->hasPhys(VirtReg)) {
   //   return true;
@@ -246,7 +243,7 @@ void RegAllocSS::LRE_WillShrinkVirtReg(unsigned VirtReg) {
 // returns a list of possible physical registers in preferred order
 std::vector<MCPhysReg> RegAllocSS::get_preferred_phys_regs(VirtReg reg) {
   auto array = RCI->getOrder(MRI->getRegClass(reg));
-  return std::vector<MCPhysReg> {array.begin(), array.end()};
+  return std::vector<MCPhysReg>{array.begin(), array.end()};
 }
 
 std::vector<VirtReg> RegAllocSS::get_all_virt_regs() {
@@ -263,31 +260,35 @@ std::vector<VirtReg> RegAllocSS::get_all_virt_regs() {
 bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
   ///// Get information /////
   MF = &MF_;
-  MRI = &MF->getRegInfo();
   MFI = &MF->getFrameInfo();
   STI = &MF->getSubtarget();
-
-  TRI = STI->getRegisterInfo();
-  TII = STI->getInstrInfo();
 
   VRM = &getAnalysis<VirtRegMap>();
   LIS = &getAnalysis<LiveIntervals>();
   LRM = &getAnalysis<LiveRegMatrix>();
   RCI = new RegisterClassInfo{};
 
+  MRI = &VRM->getRegInfo();       // &MF->getRegInfo(); // use
+  TRI = &VRM->getTargetRegInfo(); // STI->getRegisterInfo();
+  TII = STI->getInstrInfo();
+
+  // RegClassInfo.runOnMachineFunction(VRM->getMachineFunction());
+
   // TODO: make this happen when debug flag is on
-  dbgs() << "********** SS REGISTER ALLOCATION (spill all registers) **********\n"
-	 << "********** Function: " << MF->getName() << '\n';
-  MF->dump(); dbgs() << "\n";
+  dbgs()
+      << "********** SS REGISTER ALLOCATION (spill all registers) **********\n"
+      << "********** Function: " << MF->getName() << '\n';
+  MF->dump();
+  dbgs() << "\n";
 
   ///// Instantiate relevant objects /////
 
   // TODO: factor out the malloc for efficiency
-  std::unique_ptr<Spiller> spiller {createInlineSpiller(*this, *MF, *VRM)};
+  std::unique_ptr<Spiller> spiller{createInlineSpiller(*this, *MF, *VRM)};
   SmallPtrSet<MachineInstr *, 32> DeadRemats;
   std::vector<VirtReg> virt_regs = get_all_virt_regs();
   using VirtRegVec = SmallVector<unsigned, 4>;
-  interference_graph graph {virt_regs, *LIS};
+  interference_graph graph{virt_regs, *LIS};
   std::stack<VirtReg> stack;
 
   ///// Preparation /////
@@ -299,7 +300,6 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
     k = std::min(k, get_preferred_phys_regs(virt_reg).size());
   }
   dbgs() << "k " << k << "\n";
-
 
   ///// Initial pass through all virt_regs /////
 
@@ -325,21 +325,29 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
     stack.pop();
 
     if (!VRM->hasPhys(virt_reg)
-	// && !MRI->reg_nodbg_empty(virt_reg)
-	) {
-      auto maybe_color = graph.maybe_insert_and_color(virt_reg, get_preferred_phys_regs(virt_reg));
+        // && !MRI->reg_nodbg_empty(virt_reg)
+    ) {
+      auto maybe_color = graph.maybe_insert_and_color(
+          virt_reg, get_preferred_phys_regs(virt_reg));
       if (maybe_color.first) {
-	VRM->assignVirt2Phys(virt_reg, maybe_color.second);
+        LRM->assign(LIS->getInterval(virt_reg), maybe_color.second);
+        // VRM->assignVirt2Phys(virt_reg, maybe_color.second);
       } else {
-	dbgs() << "failed on " << virtReg2str(virt_reg) << "\n";
-	VirtRegVec SplitVRegs;
-	LiveInterval& LI = LIS->getInterval(virt_reg);
-	LiveRangeEdit LRE {&LI, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats};
-	spiller->spill(LRE);
-	for (VirtReg new_reg : SplitVRegs) {
-	  stack.push(new_reg);
-	  dbgs() << "redoing " << virtReg2str(new_reg) << "\n";
-	}
+        dbgs() << "failed on " << virtReg2str(virt_reg) << "\n";
+        VirtRegVec SplitVRegs;
+        LiveInterval &LI = LIS->getInterval(virt_reg);
+        LiveRangeEdit LRE{&LI, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats};
+        spiller->spill(LRE);
+
+        for (VirtReg new_reg : SplitVRegs) {
+          LiveInterval *split_vreg = &LIS->getInterval(new_reg);
+          // if (MRI->reg_nodbg_empty(split_vreg->reg)) {
+          //   LIS->removeInterval(split_vreg->reg);
+          //   continue;
+          // }
+          stack.push(new_reg);
+          dbgs() << "redoing " << virtReg2str(new_reg) << "\n";
+        }
       }
     }
   }
@@ -367,6 +375,4 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
   return true;
 }
 
-FunctionPass *llvm::createSSRegisterAllocator() {
-  return new RegAllocSS();
-}
+FunctionPass *llvm::createSSRegisterAllocator() { return new RegAllocSS(); }
