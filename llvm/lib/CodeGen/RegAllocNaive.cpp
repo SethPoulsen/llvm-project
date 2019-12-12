@@ -16,7 +16,6 @@
 #include "RegAllocBase.h"
 #include "Spiller.h"
 #include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/CodeGen/CalcSpillWeights.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
@@ -45,19 +44,6 @@ static RegisterRegAlloc naiveRegAlloc("ranaive", "Sam + Seth's Naive Register Al
                                       createNaiveRegisterAllocator);
 
 namespace {
-  struct CompSpillWeight {
-    bool operator()(LiveInterval *A, LiveInterval *B) const {
-      return A->weight < B->weight;
-    }
-  };
-}
-
-namespace {
-/// RegAllocNaive provides a minimal implementation of the basic register allocation
-/// algorithm. It prioritizes live virtual registers by spill weight and spills
-/// whenever a register is unavailable. This is not practical in production but
-/// provides a useful baseline both for measuring other allocators and comparing
-/// the speed of the basic algorithm against other styles of allocators.
 class RegAllocNaive : public MachineFunctionPass,
                 public RegAllocBase,
                 private LiveRangeEdit::Delegate {
@@ -66,15 +52,11 @@ class RegAllocNaive : public MachineFunctionPass,
 
   // state
   std::unique_ptr<Spiller> SpillerInstance;
-  std::priority_queue<LiveInterval*, std::vector<LiveInterval*>,
-                      CompSpillWeight> Queue;
+  std::queue<LiveInterval*> Queue;
 
   // Scratch space.  Allocated here to avoid repeated malloc calls in
   // selectOrSplit().
   BitVector UsableRegs;
-
-  bool LRE_CanEraseVirtReg(unsigned) override;
-  void LRE_WillShrinkVirtReg(unsigned) override;
 
 public:
   RegAllocNaive();
@@ -96,7 +78,7 @@ public:
   LiveInterval *dequeue() override {
     if (Queue.empty())
       return nullptr;
-    LiveInterval *LI = Queue.top();
+    LiveInterval *LI = Queue.front();
     Queue.pop();
     return LI;
   }
@@ -136,31 +118,6 @@ INITIALIZE_PASS_DEPENDENCY(LiveRegMatrix)
 INITIALIZE_PASS_END(RegAllocNaive, "RegAllocNaive", "Sam + Seth Naive Register Allocator", false,
                     false)
 
-bool RegAllocNaive::LRE_CanEraseVirtReg(unsigned VirtReg) {
-  LiveInterval &LI = LIS->getInterval(VirtReg);
-  if (VRM->hasPhys(VirtReg)) {
-    Matrix->unassign(LI);
-    aboutToRemoveInterval(LI);
-    return true;
-  }
-  // Unassigned virtreg is probably in the priority queue.
-  // RegAllocBase will erase it after dequeueing.
-  // Nonetheless, clear the live-range so that the debug
-  // dump will show the right state for that VirtReg.
-  LI.clear();
-  return false;
-}
-
-void RegAllocNaive::LRE_WillShrinkVirtReg(unsigned VirtReg) {
-  if (!VRM->hasPhys(VirtReg))
-    return;
-
-  // Register is assigned, put it back on the queue for reassignment.
-  LiveInterval &LI = LIS->getInterval(VirtReg);
-  Matrix->unassign(LI);
-  enqueue(&LI);
-}
-
 RegAllocNaive::RegAllocNaive(): MachineFunctionPass(ID) {
 }
 
@@ -193,28 +150,10 @@ void RegAllocNaive::releaseMemory() {
   SpillerInstance.reset();
 }
 
-// Driver for the register assignment and splitting heuristics.
-// Manages iteration over the LiveIntervalUnions.
-//
-// This is a minimal implementation of register assignment and splitting that
-// spills whenever we run out of registers.
-//
-// selectOrSplit can only be called once per live virtual register. We then do a
-// single interference test for each register the correct class until we find an
-// available register. So, the number of interference tests in the worst case is
-// |vregs| * |machineregs|. And since the number of interference tests is
-// minimal, there is no value in caching them outside the scope of
-// selectOrSplit().
 unsigned RegAllocNaive::selectOrSplit(LiveInterval &VirtReg,
                                 SmallVectorImpl<unsigned> &SplitVRegs) {
-  // Populate a list of physical register spill candidates.
-  SmallVector<unsigned, 8> PhysRegSpillCands;
-
-  // No other spill candidates were found, so spill the current VirtReg.
-  LLVM_DEBUG(dbgs() << "spilling: " << VirtReg << '\n');
   if (!VirtReg.isSpillable()) {
-    // SETH_DEBUG << "Virtual register not spillable" << std::endl;
-    // return ~0u;
+    SS_DEBUG << "Virtual register not spillable" << std::endl;
     AllocationOrder Order(VirtReg.reg, *VRM, RegClassInfo, Matrix);
     while (unsigned PhysReg = Order.next()) {
       // Check for interference in PhysReg
@@ -227,6 +166,7 @@ unsigned RegAllocNaive::selectOrSplit(LiveInterval &VirtReg,
         continue;
       }
     }
+    assert(false && "Unable to find physical register for unspillable virtual register!");
   }
   LiveRangeEdit LRE(&VirtReg, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   spiller().spill(LRE);
@@ -248,9 +188,6 @@ bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
   RegAllocBase::init(getAnalysis<VirtRegMap>(),
                      getAnalysis<LiveIntervals>(),
                      getAnalysis<LiveRegMatrix>());
-  calculateSpillWeightsAndHints(*LIS, *MF, VRM,
-                                getAnalysis<MachineLoopInfo>(),
-                                getAnalysis<MachineBlockFrequencyInfo>());
 
   SpillerInstance.reset(createInlineSpiller(*this, *MF, *VRM));
 

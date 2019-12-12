@@ -4,10 +4,13 @@ import asyncio
 from glob import glob
 import subprocess as sp
 import sys
+import re
 
 register_allocators = ["ranaive", "rass", "basic", "greedy", "fast", "pbqp"]
 test_runs = 5
 fileNames = [fileName[:-2] for fileName in glob('*.c')]
+# fileNames = ['quadratic']
+spills_regex = r"\s*(\d+)\ regalloc\s+-\ Number of spills inserted"
 
 async def async_run(cmd, capture_output=False, check=False):
     '''this is a clone of subprocess.run that is async'''
@@ -35,18 +38,22 @@ async def benchmark_file(fileName):
 async def benchmark_allocator(fileName, allocator):
     asm_name = f'./{fileName}_{allocator}.s'
     bin_name = f'./{fileName}_{allocator}.exe'
-    await async_run(["../build/bin/llc",
+    stats = await async_run(["../build/bin/llc",
                      fileName + ".bc",
                      "-regalloc=" + allocator,
                      '-o',
-                     asm_name],
+                     asm_name,
+                     "-stats"],
                     capture_output=True, check=True)
+    match = re.search(spills_regex, stats.stderr.decode("utf-8"))
+    spills = match.group(1) if match else 0
+
     # assembly -> binary
     await async_run(["clang", asm_name, "-lm", '-o', bin_name],
                     capture_output=True, check=True)
     times = await asyncio.gather(*[benchmark_allocator_once(bin_name)
                                    for _ in range(0, test_runs)])
-    return average(times)
+    return average(times), spills
 
 def average(times):
     return sum(times) / len(times)
@@ -63,9 +70,15 @@ def table(lists, size=15):
         print(row_format.format(*list_))
 
 if __name__ == '__main__':
-    output = [['test-case', *register_allocators]]
+    time_output = [['test-case', *register_allocators]]
+    spills_output = [['test-case', *register_allocators]]
     results = asyncio.run(benchmark(fileNames))
     for fileName, results in zip(fileNames, results):
-        results = [round(result, 3) for result in results]
-        output.append([fileName, *results])
-    table(output)
+        time_results = [round(result[0], 3) for result in results]
+        spill_results = [result[1] for result in results]
+        time_output.append([fileName, *time_results])
+        spills_output.append([fileName, *spill_results])
+    print("Time")
+    table(time_output)
+    print("\nSpills")
+    table(spills_output)
