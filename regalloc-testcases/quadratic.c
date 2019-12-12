@@ -16,7 +16,7 @@ float quadratic(double a, double b, double c) {
 int main() {
     for (unsigned long i = 0; i < 100000000L; ++i) {
         double x = quadratic(3, -4, -5);   
-        assert(x > 2.10 && x < 2.12 || "Wrong Answer!!!");
+        assert(x > 2.10 && x < 2.12 && "Wrong Answer!!!");
     }
     return 0;
 }
