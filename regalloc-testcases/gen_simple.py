@@ -1,6 +1,6 @@
 import random
 
-n = 4
+n = 5
 arg_names = ['a' + str(i) for i in range(n)]
 sum_expr = ' + '.join(
     f'{arg1}*{arg2}'

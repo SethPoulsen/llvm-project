@@ -39,6 +39,19 @@ namespace {
 
   using VirtReg = unsigned int;
 
+  std::string virtReg2str(VirtReg reg) {
+    static const std::string alphabet = "abcdefghijklmnopqrstuvwxyz";
+    VirtReg reduced_reg = (reg - 2147483648);
+    std::string out = "";
+    while (reduced_reg > 0) {
+      unsigned letter_no = reduced_reg % alphabet.size();
+      reduced_reg /= alphabet.size();
+      out = alphabet[letter_no] + out;
+    }
+    return out;
+  }
+
+
   // https://llvm.org/doxygen/classllvm_1_1MachineFunctionPass.html
   class RegAllocSS : public MachineFunctionPass,
                      private LiveRangeEdit::Delegate  {
@@ -113,11 +126,11 @@ namespace {
     const LiveIntervals& LIS;
 
     void insert(VirtReg reg1) {
-      dbgs() << "Insert " << reg1 << ": ";
+      dbgs() << "Insert " << virtReg2str(reg1) << ": ";
       for (const auto& pair : neighbors) {
 	VirtReg reg2 = pair.first;
-	if (LIS.getInterval(reg1).overlaps(LIS.getInterval(reg2))) {
-	  dbgs() << reg2 << " ";
+	if (reg1 != reg2 && LIS.getInterval(reg1).overlaps(LIS.getInterval(reg2))) {
+	  dbgs() << virtReg2str(reg2) << " ";
 	  neighbors[reg1].insert(reg2);
 	  neighbors[reg2].insert(reg1);
 	}
@@ -172,6 +185,7 @@ namespace {
       for (MCPhysReg color : possible_colors) {
 	// in the loop
 	// found a color
+	dbgs() << "colored " << virtReg2str(reg) << " " << color << "\n";
 	colors[reg] = color;
 	return {true, color};
       }
@@ -206,17 +220,19 @@ INITIALIZE_PASS_END(RegAllocSS, "RegAllocSS", "Sam + Seth Register Allocator",
 		    false, false)
 
 bool RegAllocSS::LRE_CanEraseVirtReg(unsigned VirtReg) {
-  LiveInterval &LI = LIS->getInterval(VirtReg);
-  if (VRM->hasPhys(VirtReg)) {
-    return true;
-  }
+  return true;
+  
+  // LiveInterval &LI = LIS->getInterval(VirtReg);
+  // if (VRM->hasPhys(VirtReg)) {
+  //   return true;
+  // }
 
-  // Unassigned virtreg is probably in the priority queue.
-  // RegAllocBase will erase it after dequeueing.
-  // Nonetheless, clear the live-range so that the debug
-  // dump will show the right state for that VirtReg.
-  LI.clear();
-  return false;
+  // // Unassigned virtreg is probably in the priority queue.
+  // // RegAllocBase will erase it after dequeueing.
+  // // Nonetheless, clear the live-range so that the debug
+  // // dump will show the right state for that VirtReg.
+  // LI.clear();
+  // return false;
 }
 
 void RegAllocSS::LRE_WillShrinkVirtReg(unsigned VirtReg) {
@@ -290,13 +306,13 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
   while (!graph.empty()) {
     auto maybe_reg = graph.get_less_than_k(k);
     if (maybe_reg.first) {
-      dbgs() << "less than k chose: " << maybe_reg.second << "\n";
+      dbgs() << "less than k chose: " << virtReg2str(maybe_reg.second) << "\n";
       graph.remove(maybe_reg.second);
       stack.push(maybe_reg.second);
     } else {
       auto comparison = [](VirtReg r1, VirtReg r2) { return r1 < r2; };
       VirtReg reg = graph.get_max_node(comparison);
-      dbgs() << "heuristic chose: " << reg << "\n";
+      dbgs() << "heuristic chose: " << virtReg2str(reg) << "\n";
       graph.remove(reg);
       stack.push(reg);
     }
@@ -308,24 +324,21 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &MF_) {
     VirtReg virt_reg = stack.top();
     stack.pop();
 
-    dbgs() << "popped " << virt_reg << "\n";
-
     if (!VRM->hasPhys(virt_reg)
 	// && !MRI->reg_nodbg_empty(virt_reg)
 	) {
       auto maybe_color = graph.maybe_insert_and_color(virt_reg, get_preferred_phys_regs(virt_reg));
       if (maybe_color.first) {
-	dbgs() << "colored " << virt_reg << "\n";
 	VRM->assignVirt2Phys(virt_reg, maybe_color.second);
       } else {
-	dbgs() << "failed on " << virt_reg << "\n";
+	dbgs() << "failed on " << virtReg2str(virt_reg) << "\n";
 	VirtRegVec SplitVRegs;
 	LiveInterval& LI = LIS->getInterval(virt_reg);
 	LiveRangeEdit LRE {&LI, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats};
 	spiller->spill(LRE);
 	for (VirtReg new_reg : SplitVRegs) {
 	  stack.push(new_reg);
-	  dbgs() << "redoing " << new_reg << "\n";
+	  dbgs() << "redoing " << virtReg2str(new_reg) << "\n";
 	}
       }
     }
