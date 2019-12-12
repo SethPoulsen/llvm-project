@@ -113,7 +113,7 @@ main(int argc, char *argv[])
 		} else if (atol(argv[II]) > 0) {
 			loopstart = atol(argv[II]);
 		} else {
-			fprintf(stderr, USAGE);
+			// fprintf(stderr, USAGE);
 			return(1);
 		}
 		II++;
