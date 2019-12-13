@@ -92,6 +92,10 @@ public:
     return {false, 0};
   }
 
+  unsigned get_degree(VirtReg r) const {
+    return neighbors.at(r).size();
+  }
+
   VirtReg get_max_node(std::function<bool(VirtReg, VirtReg)> func) {
     using pair = std::pair<VirtReg, std::set<VirtReg>>;
     const auto &m = std::min_element(neighbors.cbegin(), neighbors.cend(),
@@ -170,6 +174,7 @@ public:
     return MachineFunctionProperties().set(
         MachineFunctionProperties::Property::NoPHIs);
   }
+  float getSpillWeight(VirtReg r, const interference_graph& g);
 
   static char ID;
 };
@@ -242,6 +247,12 @@ std::vector<MCPhysReg> RegAllocSS::get_preferred_phys_regs(VirtReg reg) {
   return regs;
 }
 
+float RegAllocSS::getSpillWeight(VirtReg r, const interference_graph& graph) {
+  float usage_weight = LIS->getInterval(r).weight;
+  unsigned graph_degree = graph.get_degree(r);
+  return usage_weight / pow(graph_degree ? graph_degree : 1, 2);
+}
+
 bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
   LLVM_DEBUG(dbgs() << "********** CHAITIN-BRIGGS REGISTER ALLOCATION **********\n"
                     << "********** Function: " << mf.getName() << '\n');
@@ -257,6 +268,7 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
 
   TRI = &VRM->getTargetRegInfo();
   MRI = &VRM->getRegInfo();
+
   MRI->freezeReservedRegs(VRM->getMachineFunction());
   RCI.runOnMachineFunction(VRM->getMachineFunction());
 
@@ -292,7 +304,9 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
       graph.remove(maybe_reg.second);
       stack.push(maybe_reg.second);
     } else {
-      auto comparison = [](VirtReg r1, VirtReg r2) { return r1 < r2; };
+      auto comparison = [this, graph](VirtReg r1, VirtReg r2) { 
+        return this->getSpillWeight(r1, graph) < this->getSpillWeight(r2, graph); 
+      };
       VirtReg reg = graph.get_max_node(comparison);
       dbgs() << "heuristic chose: " << virtReg2str(reg) << "\n";
       graph.remove(reg);
