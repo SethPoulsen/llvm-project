@@ -1,10 +1,13 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3.7
 
 import asyncio
 from glob import glob
+import collections
 import subprocess as sp
+import numpy as np
 import sys
 import re
+import pandas as pd
 
 # register_allocators = ["ranaive"]
 register_allocators = ["ranaive", "rass", "basic", "greedy", "fast", "pbqp"]
@@ -54,10 +57,7 @@ async def benchmark_allocator(fileName, allocator):
                     capture_output=True, check=True)
     times = await asyncio.gather(*[benchmark_allocator_once(bin_name)
                                    for _ in range(0, test_runs)])
-    return average(times), spills
-
-def average(times):
-    return sum(times) / len(times)
+    return times, spills
 
 async def benchmark_allocator_once(bin_name):
     args = ["/usr/bin/time", r'--format=%U,%S,%E', bin_name]
@@ -71,15 +71,24 @@ def table(lists, size=15):
         print(row_format.format(*list_))
 
 if __name__ == '__main__':
-    time_output = [['test-case', *register_allocators]]
-    spills_output = [['test-case', *register_allocators]]
+    time_std = collections.defaultdict(list)
+    time_mean = collections.defaultdict(list)
+    spills = collections.defaultdict(list)
     results = asyncio.run(benchmark(fileNames))
     for fileName, results in zip(fileNames, results):
-        time_results = [round(result[0], 3) for result in results]
-        spill_results = [result[1] for result in results]
-        time_output.append([fileName, *time_results])
-        spills_output.append([fileName, *spill_results])
-    print("Time")
-    table(time_output)
-    print("\nSpills")
-    table(spills_output)
+        for allocator in register_allocators:
+            time_mean[allocator].append(np.mean(result[0]))
+            time_std[allocator].append(np.std(result[0], ddof=1))
+            spills[allocator].append(result[1])
+
+    time_mean = pd.DataFrame(data=time_mean, index=pd.Index(fileNames))
+    print(time_mean)
+    time_mean.to_csv('time_mean.csv')
+
+    time_std = pd.DataFrame(data=time_std, index=pd.Index(fileNames))
+    print(time_std)
+    time_std.to_csv('time_std.csv')
+
+    time_spills = pd.DataFrame(data=spills, index=pd.Index(fileNames))
+    print(time_spills)
+    time_spills.to_csv('spills.csv')
