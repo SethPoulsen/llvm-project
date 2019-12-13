@@ -1,17 +1,17 @@
-#!/usr/bin/env python3.7
+#!/usr/bin/env python3
 
 import asyncio
 from glob import glob
 import collections
 import subprocess as sp
-import numpy as np
+import math
 import sys
 import re
-import pandas as pd
+import csv
 
-# register_allocators = ["ranaive"]
 register_allocators = ["ranaive", "rass", "basic", "greedy", "fast", "pbqp"]
-test_runs = 5
+# register_allocators = ["ranaive"]
+test_runs = 14
 fileNames = [fileName[:-2] for fileName in glob('*.c')]
 # fileNames = ['quadratic']
 spills_regex = r"\s*(\d+)\ regalloc\s+-\ Number of spills inserted"
@@ -34,7 +34,7 @@ async def benchmark(fileNames):
     return await asyncio.gather(*map(benchmark_file, fileNames))
 
 async def benchmark_file(fileName):
-    await async_run(["clang", "-c", "-emit-llvm", fileName + ".c",],
+    await async_run(["clang", "-c", "-emit-llvm", fileName + ".c", '-O0'],
                     capture_output=True, check=True)
     return await asyncio.gather(*[benchmark_allocator(fileName, allocator)
                                   for allocator in register_allocators])
@@ -42,22 +42,29 @@ async def benchmark_file(fileName):
 async def benchmark_allocator(fileName, allocator):
     asm_name = f'./{fileName}_{allocator}.s'
     bin_name = f'./{fileName}_{allocator}.exe'
-    stats = await async_run(["../build/bin/llc",
-                     fileName + ".bc",
-                     "-regalloc=" + allocator,
-                     '-o',
-                     asm_name,
-                     "-stats"],
-                    capture_output=True, check=True)
+    stats = await async_run([
+        "../build/bin/llc",
+        fileName + ".bc",
+        "-regalloc=" + allocator,
+        '-O=3',
+        '-o',
+        asm_name,
+        "-stats"
+    ], capture_output=True, check=True)
     match = re.search(spills_regex, stats.stderr.decode("utf-8"))
-    spills = match.group(1) if match else 0
+    spills = int(match.group(1)) if match else 0
 
     # assembly -> binary
-    await async_run(["clang", asm_name, "-lm", '-o', bin_name],
+    await async_run(["clang", asm_name, "-lm", '-o', bin_name, '-O3'],
                     capture_output=True, check=True)
-    times = await asyncio.gather(*[benchmark_allocator_once(bin_name)
-                                   for _ in range(0, test_runs)])
-    return times, spills
+
+    try:
+        times = await asyncio.gather(*[benchmark_allocator_once(bin_name)
+                                       for _ in range(0, test_runs)])
+    except RuntimeError:
+        return [0, 0], spills
+    else:
+        return times, spills
 
 async def benchmark_allocator_once(bin_name):
     args = ["/usr/bin/time", r'--format=%U,%S,%E', bin_name]
@@ -70,25 +77,30 @@ def table(lists, size=15):
     for list_ in lists:
         print(row_format.format(*list_))
 
+def mean(lst):
+    return sum(lst) / len(lst)
+
+def std(lst, ddof=1):
+    avg = mean(lst)
+    return math.sqrt(sum((x - avg)**2 for x in lst) / (len(lst) - ddof))
+
 if __name__ == '__main__':
-    time_std = collections.defaultdict(list)
-    time_mean = collections.defaultdict(list)
-    spills = collections.defaultdict(list)
-    results = asyncio.run(benchmark(fileNames))
-    for fileName, results in zip(fileNames, results):
-        for allocator in register_allocators:
-            time_mean[allocator].append(np.mean(result[0]))
-            time_std[allocator].append(np.std(result[0], ddof=1))
-            spills[allocator].append(result[1])
+    all_results = asyncio.run(benchmark(fileNames))
 
-    time_mean = pd.DataFrame(data=time_mean, index=pd.Index(fileNames))
-    print(time_mean)
-    time_mean.to_csv('time_mean.csv')
+    with open(f'time_mean.csv', 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow([''] + register_allocators)
+        for fileName, results in zip(fileNames, all_results):
+            writer.writerow([fileName] + [mean(result[0]) for result in results])
+            
+    with open(f'time_std.csv', 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow([''] + register_allocators)
+        for fileName, results in zip(fileNames, all_results):
+            writer.writerow([fileName] + [std(result[0]) for result in results])
 
-    time_std = pd.DataFrame(data=time_std, index=pd.Index(fileNames))
-    print(time_std)
-    time_std.to_csv('time_std.csv')
-
-    time_spills = pd.DataFrame(data=spills, index=pd.Index(fileNames))
-    print(time_spills)
-    time_spills.to_csv('spills.csv')
+    with open(f'spills.csv', 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow([''] + register_allocators)
+        for fileName, results in zip(fileNames, all_results):
+            writer.writerow([fileName] + [result[1] for result in results])
