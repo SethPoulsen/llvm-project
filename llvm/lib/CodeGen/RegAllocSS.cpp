@@ -273,6 +273,9 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
   }
   interference_graph graph{virt_regs, *LIS};
 
+  if (virt_regs.size() == 0) {
+    return true;
+  }
   size_t k = get_preferred_phys_regs(virt_regs[0]).size();
   for (VirtReg virt_reg : virt_regs) {
     k = std::min(k, get_preferred_phys_regs(virt_reg).size());
