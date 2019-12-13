@@ -1,4 +1,4 @@
-//===-- RegAllocSS.cpp - Basic Register Allocator ----------------------===//
+//===-- RegAllocSS.cpp - Sam + Seth Register Allocator ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,8 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the RegAllocSS function pass, which provides a minimal
-// implementation of the basic register allocator.
+// This file defines the RegAllocSS function pass.
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,28 +14,18 @@
 #include "LiveDebugVariables.h"
 #include "RegAllocBase.h"
 #include "Spiller.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
 #include "llvm/CodeGen/LiveStacks.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
-#include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
-#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/VirtRegMap.h"
-#include "llvm/PassAnalysisSupport.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/Statistic.h"
 #include <stack>
-#include <cstdlib>
 #include <queue>
-#include <iostream>
 
 using namespace llvm;
 
@@ -84,8 +73,7 @@ private:
 
 public:
   interference_graph(const std::vector<VirtReg> &virt_regs,
-                     const LiveIntervals &_LIS)
-      : LIS(_LIS) {
+                     const LiveIntervals &_LIS): LIS(_LIS) {
     for (VirtReg virt_reg1 : virt_regs) {
       // initialize the nieghbor list for this one
       neighbors[virt_reg1];
@@ -162,9 +150,6 @@ class RegAllocSS : public MachineFunctionPass,
 
   std::vector<MCPhysReg> get_preferred_phys_regs(VirtReg reg);
 
-  bool LRE_CanEraseVirtReg(unsigned) override;
-  void LRE_WillShrinkVirtReg(unsigned) override;
-
 public:
   RegAllocSS();
 
@@ -177,9 +162,6 @@ public:
   void releaseMemory() override;
 
   Spiller &spiller() { return *SpillerInstance; }
-
-  unsigned selectOrSplit(LiveInterval &VirtReg,
-                         SmallVectorImpl<unsigned> &SplitVRegs);
 
   /// Perform register allocation.
   bool runOnMachineFunction(MachineFunction &mf) override;
@@ -212,32 +194,6 @@ INITIALIZE_PASS_DEPENDENCY(VirtRegMap)
 INITIALIZE_PASS_DEPENDENCY(LiveRegMatrix)
 INITIALIZE_PASS_END(RegAllocSS, "RegAllocSS", "Sam + Seth Naive Register Allocator", false,
                     false)
-
-bool RegAllocSS::LRE_CanEraseVirtReg(unsigned VirtReg) {
-  LiveInterval &LI = LIS->getInterval(VirtReg);
-  if (VRM->hasPhys(VirtReg)) {
-    Matrix->unassign(LI);
-    // aboutToRemoveInterval(LI);
-    return true;
-  }
-  // Unassigned virtreg is probably in the priority queue.
-  // RegAllocBase will erase it after dequeueing.
-  // Nonetheless, clear the live-range so that the debug
-  // dump will show the right state for that VirtReg.
-  LI.clear();
-  return false;
-}
-
-void RegAllocSS::LRE_WillShrinkVirtReg(unsigned VirtReg) {
-  if (!VRM->hasPhys(VirtReg))
-    return;
-
-  // Register is assigned, put it back on the queue for reassignment.
-  LiveInterval &LI = LIS->getInterval(VirtReg);
-  Matrix->unassign(LI);
-  // enqueue(&LI);
-  
-}
 
 RegAllocSS::RegAllocSS(): MachineFunctionPass(ID) {
 }
@@ -274,7 +230,7 @@ void RegAllocSS::releaseMemory() {
 std::vector<MCPhysReg> RegAllocSS::get_preferred_phys_regs(VirtReg reg) {
   auto array = RCI.getOrder(MRI->getRegClass(reg));
   std::vector<MCPhysReg> regs; 
-  for (auto PhysReg: array) {//(auto PhysReg = array.begin(); PhysReg != array.end(); PhysReg->next()) {
+  for (auto PhysReg: array) {
     switch (Matrix->checkInterference(LIS->getInterval(reg), PhysReg)) {
     case LiveRegMatrix::IK_Free:
       regs.push_back(PhysReg);
@@ -287,7 +243,7 @@ std::vector<MCPhysReg> RegAllocSS::get_preferred_phys_regs(VirtReg reg) {
 }
 
 bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
-  LLVM_DEBUG(dbgs() << "********** NAIVE REGISTER ALLOCATION (spill all registers) **********\n"
+  LLVM_DEBUG(dbgs() << "********** CHAITIN-BRIGGS REGISTER ALLOCATION **********\n"
                     << "********** Function: " << mf.getName() << '\n');
 
   MF = &mf;
@@ -314,7 +270,6 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
     if (MRI->reg_nodbg_empty(Reg))
       continue;
     virt_regs.push_back(Reg);
-    // enqueue(&LIS->getInterval(Reg));
   }
   interference_graph graph{virt_regs, *LIS};
 
@@ -322,6 +277,8 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
   for (VirtReg virt_reg : virt_regs) {
     k = std::min(k, get_preferred_phys_regs(virt_reg).size());
   }
+
+  //======================= Actual allocation loop =======================
 
   ///// Initial pass through all virt_regs /////
 
@@ -346,9 +303,8 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
     VirtReg virt_reg = stack.top();
     stack.pop();
 
-    if (!VRM->hasPhys(virt_reg)
-        // && !MRI->reg_nodbg_empty(virt_reg)
-    ) {
+    if (!VRM->hasPhys(virt_reg)) {
+
       auto maybe_color = graph.maybe_insert_and_color(virt_reg, get_preferred_phys_regs(virt_reg));
 
       if (maybe_color.first) {
@@ -373,10 +329,8 @@ bool RegAllocSS::runOnMachineFunction(MachineFunction &mf) {
     }
   }
 
-
-
   //======================= End Actual allocation loop =======================
-  // postOptimization();
+
   spiller().postOptimization();
   for (auto DeadInst : DeadRemats) {
     LIS->RemoveMachineInstrFromMaps(*DeadInst);

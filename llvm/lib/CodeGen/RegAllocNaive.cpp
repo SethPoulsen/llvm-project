@@ -15,60 +15,35 @@
 #include "LiveDebugVariables.h"
 #include "RegAllocBase.h"
 #include "Spiller.h"
-#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/LiveRangeEdit.h"
 #include "llvm/CodeGen/LiveRegMatrix.h"
 #include "llvm/CodeGen/LiveStacks.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
-#include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/RegAllocRegistry.h"
-#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/VirtRegMap.h"
-#include "llvm/PassAnalysisSupport.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/Statistic.h"
-#include <cstdlib>
 #include <queue>
-#include <iostream>
 
 using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
-
-STATISTIC(NumNewQueued    , "Number of new live ranges queued");
 
 static RegisterRegAlloc naiveRegAlloc("ranaive", "Sam + Seth's Naive Register Allocator",
                                       createNaiveRegisterAllocator);
 
 namespace {
 class RegAllocNaive : public MachineFunctionPass,
+                public RegAllocBase,
                 private LiveRangeEdit::Delegate {
+
   // context
   MachineFunction *MF;
 
-  const TargetRegisterInfo *TRI = nullptr;
-  MachineRegisterInfo *MRI = nullptr;
-  VirtRegMap *VRM = nullptr;
-  LiveIntervals *LIS = nullptr;
-  LiveRegMatrix *Matrix = nullptr;
-  RegisterClassInfo RegClassInfo;
-
-  SmallPtrSet<MachineInstr *, 32> DeadRemats;
-
-
-  // state
   std::unique_ptr<Spiller> SpillerInstance;
   std::queue<LiveInterval*> Queue;
-
-  // Scratch space.  Allocated here to avoid repeated malloc calls in
-  // selectOrSplit().
-  BitVector UsableRegs;
 
 public:
   RegAllocNaive();
@@ -81,13 +56,13 @@ public:
 
   void releaseMemory() override;
 
-  Spiller &spiller() { return *SpillerInstance; }
+  Spiller &spiller() override { return *SpillerInstance; }
 
-  void enqueue(LiveInterval *LI) {
+  void enqueue(LiveInterval *LI) override {
     Queue.push(LI);
   }
 
-  LiveInterval *dequeue() {
+  LiveInterval *dequeue() override {
     if (Queue.empty())
       return nullptr;
     LiveInterval *LI = Queue.front();
@@ -96,7 +71,7 @@ public:
   }
 
   unsigned selectOrSplit(LiveInterval &VirtReg,
-                         SmallVectorImpl<unsigned> &SplitVRegs);
+                         SmallVectorImpl<unsigned> &SplitVRegs) override;
 
   /// Perform register allocation.
   bool runOnMachineFunction(MachineFunction &mf) override;
@@ -171,7 +146,6 @@ unsigned RegAllocNaive::selectOrSplit(LiveInterval &VirtReg,
       // Check for interference in PhysReg
       switch (Matrix->checkInterference(VirtReg, PhysReg)) {
       case LiveRegMatrix::IK_Free:
-        // PhysReg is available, allocate it.
         SS_DEBUG << "Allocating Physical Register " << PhysReg << std::endl;
         return PhysReg;
       default:
@@ -180,16 +154,11 @@ unsigned RegAllocNaive::selectOrSplit(LiveInterval &VirtReg,
     }
     assert(false && "Unable to find physical register for unspillable virtual register!");
   }
-  //  else {
+
   LiveRangeEdit LRE(&VirtReg, SplitVRegs, *MF, *LIS, VRM, this, &DeadRemats);
   spiller().spill(LRE);
-
-  // The live virtual register requesting allocation was spilled, so tell
-  // the caller not to allocate anything during this round.
   SS_DEBUG << "Live virtual register requesting allocation was spilled" << std::endl;
   return 0;
-  // }
-
 }
 
 bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
@@ -200,64 +169,14 @@ bool RegAllocNaive::runOnMachineFunction(MachineFunction &mf) {
   SlotIndexes& slotIndexes = getAnalysis<SlotIndexes>();
   MF->print(dbgs(), &slotIndexes);
   SS_DEBUG << std::endl;
-
-  VRM = &getAnalysis<VirtRegMap>();
-  LIS = &getAnalysis<LiveIntervals>();
-  Matrix = &getAnalysis<LiveRegMatrix>();
-
-  TRI = &VRM->getTargetRegInfo();
-  MRI = &VRM->getRegInfo();
-  MRI->freezeReservedRegs(VRM->getMachineFunction());
-  RegClassInfo.runOnMachineFunction(VRM->getMachineFunction());
+  RegAllocBase::init(getAnalysis<VirtRegMap>(),
+                     getAnalysis<LiveIntervals>(),
+                     getAnalysis<LiveRegMatrix>());
 
   SpillerInstance.reset(createInlineSpiller(*this, *MF, *VRM));
 
-  for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
-    unsigned Reg = TargetRegisterInfo::index2VirtReg(i);
-    if (MRI->reg_nodbg_empty(Reg))
-      continue;
-    enqueue(&LIS->getInterval(Reg));
-  }
-
-  // Continue assigning vregs one at a time to available physical registers.
-  while (LiveInterval *VirtReg = dequeue()) {
-    SS_DEBUG << "Trying to assign vreg to phys reg" << std::endl;
-    VirtReg->dump();
-
-    // Unused registers can appear when the spiller coalesces snippets.
-    if (MRI->reg_nodbg_empty(VirtReg->reg)) {
-      LLVM_DEBUG(dbgs() << "Dropping unused " << *VirtReg << '\n');
-      LIS->removeInterval(VirtReg->reg);
-      continue;
-    }
-
-    // Invalidate all interference queries, live ranges could have changed.
-    Matrix->invalidateVirtRegs();
-
-    SmallVector<unsigned, 4> SplitVRegs;
-    unsigned AvailablePhysReg = selectOrSplit(*VirtReg, SplitVRegs);
-
-    if (AvailablePhysReg)
-      Matrix->assign(*VirtReg, AvailablePhysReg);
-
-    for (unsigned Reg : SplitVRegs) {
-      SS_DEBUG << "Split VReg " << Reg << std::endl;
-      LiveInterval *SplitVirtReg = &LIS->getInterval(Reg);
-      if (MRI->reg_nodbg_empty(SplitVirtReg->reg)) {
-        LIS->removeInterval(SplitVirtReg->reg);
-        continue;
-      }
-      enqueue(SplitVirtReg);
-      ++NumNewQueued;
-    }
-  }
-  // postOptimization();
-  spiller().postOptimization();
-  for (auto DeadInst : DeadRemats) {
-    LIS->RemoveMachineInstrFromMaps(*DeadInst);
-    DeadInst->eraseFromParent();
-  }
-  DeadRemats.clear();
+  allocatePhysRegs();
+  postOptimization();
 
   MF->dump();  SS_DEBUG << std::endl;
 
